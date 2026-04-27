@@ -321,6 +321,7 @@ def chunk_gla_fwd_kernel_o(
     chunk_indices,
     scale,
     T,
+    scalar,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -376,9 +377,9 @@ def chunk_gla_fwd_kernel_o(
         b_h = tl.load(p_h, boundary_check=(0, 1))
         if i_k >= 0:
             if TRANSPOSE_STATE:
-                b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype))
+                b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype)) * scalar
             else:
-                b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
+                b_o += tl.dot(b_qg, b_h.to(b_qg.dtype)) * scalar
     b_o *= scale
     p_v = tl.make_block_ptr(v, (T, V), (HV*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     p_o = tl.make_block_ptr(o, (T, V), (HV*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -388,7 +389,7 @@ def chunk_gla_fwd_kernel_o(
     # [BT, BT]
     b_A = tl.load(p_A, boundary_check=(0, 1))
     b_A = tl.where(m_s, b_A, 0.).to(b_v.dtype)
-    b_o += tl.dot(b_A, b_v)
+    b_o += tl.dot(b_A, b_v) * scalar
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -896,6 +897,7 @@ def chunk_gla_fwd_o_gk(
 
     # Please ensure zeros, since vllm will use padding v
     o = torch.zeros_like(v)
+    scalar = 1.0
     def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * HV)
     chunk_gla_fwd_kernel_o[grid](
         q=q,
@@ -913,6 +915,7 @@ def chunk_gla_fwd_o_gk(
         K=K,
         V=V,
         BT=BT,
+        scalar=scalar,
         USE_EXP2=use_exp2,
         TRANSPOSE_STATE=transpose_state_layout,
     )

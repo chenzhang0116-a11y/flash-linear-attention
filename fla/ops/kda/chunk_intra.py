@@ -31,8 +31,8 @@ else:
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK}, num_warps=num_warps)
-        for BK in [32, 64]
-        for num_warps in [1, 2, 4]
+        for BK in [64] # 32, 64
+        for num_warps in [1] # 1, 2, 4
     ],
     key=["H", "HV", "K", "BC"],
     **autotune_cache_kwargs,
@@ -50,6 +50,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     cu_seqlens,
     chunk_indices,
     T,
+    scalar,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -144,8 +145,8 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
             # [BK, BC]
             b_kgt = tl.trans(b_k0 * exp2(b_gn1[None, :] - b_g0))
             # [BC, BC]
-            b_Aqk10 += tl.dot(b_q1 * b_gqn, b_kgt)
-            b_Akk10 += tl.dot(b_k1 * b_gqn, b_kgt)
+            b_Aqk10 += tl.dot(b_q1 * b_gqn, b_kgt) * scalar
+            b_Akk10 += tl.dot(b_k1 * b_gqn, b_kgt) * scalar
 
             if i_tc2 < T:
                 p_q2 = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_tc2, i_k * BK), (BC, BK), (1, 0))
@@ -163,13 +164,13 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
                 b_kg2 = b_k2 * b_gqn2
                 # [BK, BC]
                 b_kgt = tl.trans(b_k0 * exp2(b_gn2[None, :] - b_g0))
-                b_Aqk20 += tl.dot(b_qg2, b_kgt)
-                b_Akk20 += tl.dot(b_kg2, b_kgt)
+                b_Aqk20 += tl.dot(b_qg2, b_kgt) * scalar
+                b_Akk20 += tl.dot(b_kg2, b_kgt) * scalar
                 # [BC, BC]
                 b_kgt = tl.trans(b_k1 * exp2(b_gn2[None, :] - b_g1))
                 # [BC, BC]
-                b_Aqk21 += tl.dot(b_qg2, b_kgt)
-                b_Akk21 += tl.dot(b_kg2, b_kgt)
+                b_Aqk21 += tl.dot(b_qg2, b_kgt) * scalar
+                b_Akk21 += tl.dot(b_kg2, b_kgt) * scalar
 
                 if i_tc3 < T:
                     p_q3 = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0))
@@ -188,18 +189,18 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
                     # [BK, BC]
                     b_kgt = tl.trans(b_k0 * exp2(b_gn3[None, :] - b_g0))
                     # [BC, BC]
-                    b_Aqk30 += tl.dot(b_qg3, b_kgt)
-                    b_Akk30 += tl.dot(b_kg3, b_kgt)
+                    b_Aqk30 += tl.dot(b_qg3, b_kgt) * scalar
+                    b_Akk30 += tl.dot(b_kg3, b_kgt) * scalar
                     # [BK, BC]
                     b_kgt = tl.trans(b_k1 * exp2(b_gn3[None, :] - b_g1))
                     # [BC, BC]
-                    b_Aqk31 += tl.dot(b_qg3, b_kgt)
-                    b_Akk31 += tl.dot(b_kg3, b_kgt)
+                    b_Aqk31 += tl.dot(b_qg3, b_kgt) * scalar
+                    b_Akk31 += tl.dot(b_kg3, b_kgt) * scalar
                     # [BK, BC]
                     b_kgt = tl.trans(b_k2 * exp2(b_gn3[None, :] - b_g2))
                     # [BC, BC]
-                    b_Aqk32 += tl.dot(b_qg3, b_kgt)
-                    b_Akk32 += tl.dot(b_kg3, b_kgt)
+                    b_Aqk32 += tl.dot(b_qg3, b_kgt) * scalar
+                    b_Akk32 += tl.dot(b_kg3, b_kgt) * scalar
 
     ################################################################################
     # save off-diagonal Aqk blocks and prepare Akk
@@ -814,6 +815,7 @@ def chunk_kda_fwd_intra(
 
     # Step 2: Fused inter + solve_tril (works for both fixed-len and varlen)
     grid = (NT, B * HV)
+    scalar = 1.0
     chunk_kda_fwd_kernel_inter_solve_fused[grid](
         q=q,
         k=k,
@@ -826,12 +828,14 @@ def chunk_kda_fwd_intra(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
+        scalar=scalar,
         H=H,
         HV=HV,
         K=K,
         BT=BT,
         BC=BC,
         USE_SAFE_GATE=safe_gate,
+        inject_barrier_all=True,
     )
     w, u, qg, kg = recompute_w_u_fwd(
         k=k,
