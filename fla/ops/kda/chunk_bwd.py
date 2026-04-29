@@ -197,7 +197,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     tl.extra.cann.extension.compile_hint(b_beta, "mayDiscretememaccess")
 
     p_A = tl.make_block_ptr(A, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
-    b_A = tl.load(p_A, boundary_check=(0, 1))
+    b_A = tl.load(p_A, boundary_check=(0, 1), padding_option="zero")
     tl.extra.cann.extension.compile_hint(b_A, "mayDiscretememaccess")
 
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
@@ -217,6 +217,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         p_gn = g + (min(T, i_t * BT + BT) - 1).to(tl.int64) * HV*K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)
         tl.extra.cann.extension.compile_hint(b_gn, "mayDiscretememaccess")
+        b_gn = tl.where(m_k, b_gn, 0)
 
         b_dq = tl.zeros([BT, BK], dtype=tl.float32)
         b_dk = tl.zeros([BT, BK], dtype=tl.float32)
@@ -292,18 +293,24 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         b_dg = b_q * b_dq - b_kdk + m_last[:, None] * b_dgk + b_kg * b_dkgb * b_beta[:, None]
         b_dk = b_dk + b_dkgb * b_gb
 
-        p_dq = tl.make_block_ptr(dq, (T, K), (HV*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dk = tl.make_block_ptr(dk, (T, K), (HV*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dg = tl.make_block_ptr(dg, (T, K), (HV*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dqkg_dim0 = i_t * BT + tl.arange(0, BT)
+        p_dqkg_dim1 = i_k * BK + tl.arange(0, BK)
+        p_dqkg_dim0_mask = (p_dqkg_dim0 < T) & (p_dqkg_dim0 >= 0)
+        p_dqkg_dim1_mask = (p_dqkg_dim1 < K) & (p_dqkg_dim1 >= 0)
+        p_dqkg_mask = p_dqkg_dim0_mask[:, None] & p_dqkg_dim1_mask[None, :]
+        p_dq = dq + p_dqkg_dim0[:, None] * HV*K + p_dqkg_dim1
+        p_dk = dk + p_dqkg_dim0[:, None] * HV*K + p_dqkg_dim1
+        p_dg = dg + p_dqkg_dim0[:, None] * HV*K + p_dqkg_dim1
+
         casted_b_dq = b_dq.to(p_dq.dtype.element_ty)
         tl.extra.cann.extension.compile_hint(casted_b_dq, "mayDiscretememaccess")
-        tl.store(p_dq, casted_b_dq, boundary_check=(0, 1))
+        tl.store(p_dq, casted_b_dq, mask=p_dqkg_mask)
         casted_b_dk = b_dk.to(p_dk.dtype.element_ty)
         tl.extra.cann.extension.compile_hint(casted_b_dk, "mayDiscretememaccess")
-        tl.store(p_dk, casted_b_dk, boundary_check=(0, 1))
+        tl.store(p_dk, casted_b_dk, mask=p_dqkg_mask)
         casted_b_dg = b_dg.to(p_dg.dtype.element_ty)
         tl.extra.cann.extension.compile_hint(casted_b_dg, "mayDiscretememaccess")
-        tl.store(p_dg, casted_b_dg, boundary_check=(0, 1))
+        tl.store(p_dg, casted_b_dg, mask=p_dqkg_mask)
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_dA = tl.where(m_A, b_dA * b_beta[None, :], 0)
