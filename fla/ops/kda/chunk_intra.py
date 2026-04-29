@@ -429,11 +429,15 @@ def chunk_kda_bwd_kernel_intra(
     dg2 += (bos * HV + i_hv) * K
     db += (i_k * all + bos) * HV + i_hv
 
+    m_bc = (i_ti + tl.arange(0, BC)) < T
+
     p_g = tl.make_block_ptr(g, (T, K), (HV*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     b_g = tl.load(p_g, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+    b_g = tl.where(m_bc[:, None], b_g, 0.)
 
     p_b = tl.make_block_ptr(beta, (T,), (HV,), (i_ti,), (BC,), (0,))
     b_b = tl.load(p_b, boundary_check=(0,), padding_option="zero")
+    b_b = tl.where(m_bc, b_b, 0.)
 
     b_dq2 = tl.zeros([BC, BK], dtype=tl.float32)
     b_dk2 = tl.zeros([BC, BK], dtype=tl.float32)
@@ -452,11 +456,13 @@ def chunk_kda_bwd_kernel_intra(
             b_kg = b_k * exp2(b_gn - b_gk)
             # [BC, BC]
             b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1), padding_option="zero")
+            b_dAqk = tl.where(m_bc[:, None], b_dAqk, 0.)
             b_dAkk = tl.load(p_dAkk, boundary_check=(0, 1), padding_option="zero")
+            b_dAkk = tl.where(m_bc[:, None], b_dAkk, 0.)
             # [BC, BK]
             b_dq2 += tl.dot(b_dAqk, b_kg)
             b_dk2 += tl.dot(b_dAkk, b_kg)
-        b_gqn = exp2(b_g - b_gn)
+        b_gqn = tl.where(m_bc[:, None], exp2(b_g - b_gn), 0.)
         b_dq2 *= b_gqn
         b_dk2 *= b_gqn
 
@@ -469,7 +475,9 @@ def chunk_kda_bwd_kernel_intra(
     p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     b_q = tl.load(p_q, boundary_check=(0, 1), padding_option="zero")
+    b_q = tl.where(m_bc[:, None], b_q, 0.)
     b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
+    b_k = tl.where(m_bc[:, None], b_k, 0.)
 
     if SAFE_GATE:
         if USE_GATHER:
@@ -521,7 +529,8 @@ def chunk_kda_bwd_kernel_intra(
     p_db = tl.make_block_ptr(db, (T,), (HV,), (i_ti,), (BC,), (0,))
 
     b_dg2 = b_q * b_dq2
-    b_dq2 = b_dq2 + tl.load(p_dq, boundary_check=(0, 1), padding_option="zero")
+    b_dq_input = tl.load(p_dq, boundary_check=(0, 1), padding_option="zero")
+    b_dq2 = b_dq2 + tl.where(m_bc[:, None], b_dq_input, 0.)
     tl.store(p_dq2, b_dq2.to(p_dq2.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
 
@@ -560,7 +569,7 @@ def chunk_kda_bwd_kernel_intra(
             # (SY 09/17) important to not use bf16 here to have a good precision.
             b_dkt += tl.dot(b_dAqk, b_qg)
             b_dkt += tl.dot(b_dAkk, b_kbg)
-        b_dkt *= exp2(b_gn - b_g)
+        b_dkt = tl.where(m_bc[:, None], b_dkt * exp2(b_gn - b_g), 0.)
     o_dA = i_ti * HV*BT + i_i * BC + o_i
     p_qj = q + i_ti * H*K + o_k
     p_kj = k + i_ti * H*K + o_k
@@ -575,8 +584,10 @@ def chunk_kda_bwd_kernel_intra(
             b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)[None, :]
         p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1), padding_option="zero")
+        b_q = tl.where(m_bc[:, None], b_q, 0.)
         p_b = tl.make_block_ptr(beta, (T,), (HV,), (i_ti,), (BC,), (0,))
         b_b = tl.load(p_b, boundary_check=(0,), padding_option="zero")
+        b_b = tl.where(m_bc, b_b, 0.)
 
         p_dAqk = tl.make_block_ptr(dAqk, (BT, T), (1, HV*BT), (i_i * BC, i_ti), (BC, BC), (0, 1))
         p_dAkk = tl.make_block_ptr(dAkk, (BT, T), (1, HV*BT), (i_i * BC, i_ti), (BC, BC), (0, 1))
@@ -622,8 +633,10 @@ def chunk_kda_bwd_kernel_intra(
     p_dg = tl.make_block_ptr(dg, (T, K), (HV*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_dg2 = tl.make_block_ptr(dg2, (T, K), (HV*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
 
-    b_dg2 += (b_dk2 - b_dkt) * b_k + tl.load(p_dg, boundary_check=(0, 1), padding_option="zero")
-    b_dk2 += tl.load(p_dk, boundary_check=(0, 1), padding_option="zero")
+    b_dg_input = tl.load(p_dg, boundary_check=(0, 1), padding_option="zero")
+    b_dg2 += (b_dk2 - b_dkt) * b_k + tl.where(m_bc[:, None], b_dg_input, 0.)
+    b_dk_input = tl.load(p_dk, boundary_check=(0, 1), padding_option="zero")
+    b_dk2 += tl.where(m_bc[:, None], b_dk_input, 0.)
     b_dk2 += b_dkt
 
     tl.store(p_dk2, b_dk2.to(p_dk2.dtype.element_ty), boundary_check=(0, 1))

@@ -93,8 +93,10 @@ def chunk_kda_bwd_kernel_dAv(
         p_dv = tl.make_block_ptr(dv, (T, V), (HV*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         # [BV, BT]
         b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
+        b_v = tl.where(m_t[None, :], b_v, 0.)
         # [BT, BV]
         b_do = tl.load(p_do, boundary_check=(0, 1), padding_option="zero")
+        b_do = tl.where(m_t[:, None], b_do, 0.)
         # [BT, BT]
         b_dA += tl.dot(b_do, b_v)
         # [BT, BV]
@@ -194,10 +196,12 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
 
     p_beta = tl.make_block_ptr(beta, (T,), (HV,), (i_t * BT,), (BT,), (0,))
     b_beta = tl.load(p_beta, boundary_check=(0,), padding_option="zero")
+    b_beta = tl.where(m_t, b_beta, 0.)
     tl.extra.cann.extension.compile_hint(b_beta, "mayDiscretememaccess")
 
     p_A = tl.make_block_ptr(A, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
     b_A = tl.load(p_A, boundary_check=(0, 1), padding_option="zero")
+    b_A = tl.where(m_t[None, :], b_A, 0.)
     tl.extra.cann.extension.compile_hint(b_A, "mayDiscretememaccess")
 
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
@@ -210,7 +214,9 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_g = tl.make_block_ptr(g, (T, K), (HV*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
+        b_k = tl.where(m_t[:, None], b_k, 0.)
         b_g = tl.load(p_g, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        b_g = tl.where(m_t[:, None], b_g, 0.)
         tl.extra.cann.extension.compile_hint(b_k, "mayDiscretememaccess")
         tl.extra.cann.extension.compile_hint(b_g, "mayDiscretememaccess")
 
@@ -236,7 +242,9 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
             p_dv = tl.make_block_ptr(dv, (T, V), (HV*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             # [BT, BV]
             b_v_new = tl.load(p_v_new, boundary_check=(0, 1), padding_option="zero")
+            b_v_new = tl.where(m_t[:, None], b_v_new, 0.)
             b_do = tl.load(p_do, boundary_check=(0, 1), padding_option="zero")
+            b_do = tl.where(m_t[:, None], b_do, 0.)
             tl.extra.cann.extension.compile_hint(b_v_new, "mayDiscretememaccess")
             tl.extra.cann.extension.compile_hint(b_do, "mayDiscretememaccess")
             # [BV, BK]
@@ -246,6 +254,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
             tl.extra.cann.extension.compile_hint(b_dh, "mayDiscretememaccess")
             # [BT, BV]
             b_dv = tl.load(p_dv, boundary_check=(0, 1), padding_option="zero")
+            b_dv = tl.where(m_t[:, None], b_dv, 0.)
             tl.extra.cann.extension.compile_hint(b_dv, "mayDiscretememaccess")
 
             b_dgk += tl.sum(b_h * b_dh, axis=0)
@@ -258,6 +267,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
                 p_dv2 = tl.make_block_ptr(dv2, (T, V), (HV*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
                 b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
+                b_v = tl.where(m_t[:, None], b_v, 0.)
                 tl.extra.cann.extension.compile_hint(b_v, "mayDiscretememaccess")
 
                 b_dA += tl.dot(b_dv, tl.trans(b_v)) * scalar
@@ -287,6 +297,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
 
         p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1), padding_option="zero")
+        b_q = tl.where(m_t[:, None], b_q, 0.)
         tl.extra.cann.extension.compile_hint(b_q, "mayDiscretememaccess")
         b_kdk = b_k * b_dk
         b_dgk += tl.sum(b_kdk, axis=0)
