@@ -23,7 +23,7 @@ from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 BK_LIST = [64] if check_shared_mem() else [32]
 BV_LIST = [64] if check_shared_mem('ampere') else [32]
-NUM_WARPS = [2] if IS_NVIDIA_HOPPER else [2]
+NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2]
 
 
 @triton.heuristics({
@@ -192,31 +192,35 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     db += bos * HV + i_hv
     dA += (bos * HV + i_hv) * BT
 
-    p_beta = tl.make_block_ptr(beta, (T,), (HV,), (i_t * BT,), (BT,), (0,))
-    b_beta = tl.load(p_beta, boundary_check=(0,))
+    BT_arange = i_t * BT + tl.arange(0, BT)
+    BT_arange_zero_offset = tl.arange(0, BT)
+    BT_mask = (BT_arange < T) & (BT_arange >= 0)
+    BT_mask_zero_offset = (BT_arange_zero_offset < BT) & (BT_arange_zero_offset >= 0)
+    p_beta = beta + BT_arange * HV
+    b_beta = tl.load(p_beta, mask = BT_mask, other = 0.)
     tl.extra.cann.extension.compile_hint(b_beta, "mayDiscretememaccess")
 
-    p_A = tl.make_block_ptr(A, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
-    b_A = tl.load(p_A, boundary_check=(0, 1))
+    p_A = A + BT_arange_zero_offset[:, None] + HV * BT * BT_arange
+    b_A = tl.load(p_A, mask = BT_mask_zero_offset[:, None] & BT_mask[None, :], other = 0.)
     tl.extra.cann.extension.compile_hint(b_A, "mayDiscretememaccess")
 
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
     b_db = tl.zeros([BT], dtype=tl.float32)
 
     for i_k in range(tl.cdiv(K, BK)):
+        BK_arange = i_k * BK + tl.arange(0, BK)
+        BK_mask = (BK_arange < K) & (BK_arange >= 0)
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
 
         p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_g = tl.make_block_ptr(g, (T, K), (HV*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-        tl.extra.cann.extension.compile_hint(b_k, "mayDiscretememaccess")
-        tl.extra.cann.extension.compile_hint(b_g, "mayDiscretememaccess")
+        b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
+        b_g = tl.load(p_g, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
 
         p_gn = g + (min(T, i_t * BT + BT) - 1).to(tl.int64) * HV*K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)
-        tl.extra.cann.extension.compile_hint(b_gn, "mayDiscretememaccess")
+        b_gn = tl.where(m_k, b_gn, 0)
 
         b_dq = tl.zeros([BT, BK], dtype=tl.float32)
         b_dk = tl.zeros([BT, BK], dtype=tl.float32)
@@ -224,51 +228,52 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         b_dgk = tl.zeros([BK], dtype=tl.float32)
 
         for i_v in range(tl.cdiv(V, BV)):
-            p_v_new = tl.make_block_ptr(v_new, (T, V), (HV*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_do = tl.make_block_ptr(do, (T, V), (HV*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            BV_arange = i_v * BV + tl.arange(0, BV)
+            BV_mask = (BV_arange < V) & (BV_arange >= 0)
+            p_v_new = v_new + BT_arange[:, None] * HV*V + BV_arange
+            p_do = do + BT_arange[:, None] * HV*V + BV_arange
             if TRANSPOSE_STATE:
                 p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
                 p_dh = tl.make_block_ptr(dh, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
             else:
                 p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
                 p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            p_dv = tl.make_block_ptr(dv, (T, V), (HV*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_dv = dv + BT_arange[:, None] * HV*V + BV_arange
             # [BT, BV]
-            b_v_new = tl.load(p_v_new, boundary_check=(0, 1))
-            b_do = tl.load(p_do, boundary_check=(0, 1))
+            b_v_new = tl.load(p_v_new, mask= BT_mask[:,None] & BV_mask[None, :])
             tl.extra.cann.extension.compile_hint(b_v_new, "mayDiscretememaccess")
+            b_v_new = tl.where(BT_mask[:,None] & BV_mask[None, :], b_v_new, 0)
+            b_do = tl.load(p_do, mask= BT_mask[:,None] & BV_mask[None, :])
             tl.extra.cann.extension.compile_hint(b_do, "mayDiscretememaccess")
+            b_do = tl.where(BT_mask[:,None] & BV_mask[None, :], b_do, 0)
             # [BV, BK]
             b_h = tl.load(p_h, boundary_check=(0, 1))
-            b_dh = tl.load(p_dh, boundary_check=(0, 1))
             tl.extra.cann.extension.compile_hint(b_h, "mayDiscretememaccess")
+            b_dh = tl.load(p_dh, boundary_check=(0, 1))
             tl.extra.cann.extension.compile_hint(b_dh, "mayDiscretememaccess")
             # [BT, BV]
-            b_dv = tl.load(p_dv, boundary_check=(0, 1))
+            b_dv = tl.load(p_dv, mask= BT_mask[:,None] & BV_mask[None, :])
             tl.extra.cann.extension.compile_hint(b_dv, "mayDiscretememaccess")
 
             b_dgk += tl.sum(b_h * b_dh, axis=0)
-            b_dq += tl.dot(b_do, b_h.to(b_do.dtype))  * scalar
-            b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype))  * scalar
-            b_dw += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype))  * scalar
+            b_dq += tl.dot(b_do, b_h.to(b_do.dtype)) * scalar
+            b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype)) * scalar
+            b_dw += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype)) * scalar
             tl.debug_barrier()  # DO NOT REMOVE THIS LINE!
             if i_k == 0:
-                p_v = tl.make_block_ptr(v, (T, V), (HV*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                p_dv2 = tl.make_block_ptr(dv2, (T, V), (HV*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+                p_v = v + BT_arange[:, None] * HV*V + BV_arange
+                p_dv2 = dv2 + BT_arange[:, None] * HV*V + BV_arange
 
-                b_v = tl.load(p_v, boundary_check=(0, 1))
-                tl.extra.cann.extension.compile_hint(b_v, "mayDiscretememaccess")
+                b_v = tl.load(p_v, mask = BT_mask[:, None] & BV_mask[None, :], other = 0.0)
 
-                b_dA += tl.dot(b_dv, tl.trans(b_v)) * scalar
+                b_dA += tl.dot(b_dv, tl.trans(b_v))  * scalar
 
                 b_dvb = tl.dot(b_A, b_dv)
                 b_dv2 = b_dvb * b_beta[:, None]
                 b_db += tl.sum(b_dvb * b_v, 1)
-
                 casted_b_dv2 = b_dv2.to(p_dv2.dtype.element_ty)
                 tl.extra.cann.extension.compile_hint(casted_b_dv2, "mayDiscretememaccess")
-                tl.store(p_dv2, casted_b_dv2, boundary_check=(0, 1))
- 
+                tl.store(p_dv2, casted_b_dv2, mask = BT_mask[:, None] & BV_mask[None, :])
 
         b_gk_exp = exp2(b_g)
         b_gb = b_gk_exp * b_beta[:, None]
@@ -285,25 +290,31 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         b_db += tl.sum(b_dkgb * b_kg, 1)
 
         p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = tl.load(p_q, boundary_check=(0, 1), padding_option="zero")
         tl.extra.cann.extension.compile_hint(b_q, "mayDiscretememaccess")
         b_kdk = b_k * b_dk
         b_dgk += tl.sum(b_kdk, axis=0)
         b_dg = b_q * b_dq - b_kdk + m_last[:, None] * b_dgk + b_kg * b_dkgb * b_beta[:, None]
         b_dk = b_dk + b_dkgb * b_gb
 
-        p_dq = tl.make_block_ptr(dq, (T, K), (HV*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dk = tl.make_block_ptr(dk, (T, K), (HV*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dg = tl.make_block_ptr(dg, (T, K), (HV*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dqkg_dim0 = i_t * BT + tl.arange(0, BT)
+        p_dqkg_dim1 = i_k * BK + tl.arange(0, BK)
+        p_dqkg_dim0_mask = (p_dqkg_dim0 < T) & (p_dqkg_dim0 >= 0)
+        p_dqkg_dim1_mask = (p_dqkg_dim1 < K) & (p_dqkg_dim1 >= 0)
+        p_dqkg_mask =  p_dqkg_dim0_mask[:, None] & p_dqkg_dim1_mask[None, :]
+        p_dq = dq + p_dqkg_dim0[:, None] * H*K + p_dqkg_dim1
+        p_dk = dk + p_dqkg_dim0[:, None] * H*K + p_dqkg_dim1
+        p_dg = dg + p_dqkg_dim0[:, None] * H*K + p_dqkg_dim1
+
         casted_b_dq = b_dq.to(p_dq.dtype.element_ty)
         tl.extra.cann.extension.compile_hint(casted_b_dq, "mayDiscretememaccess")
-        tl.store(p_dq, casted_b_dq, boundary_check=(0, 1))
+        tl.store(p_dq, casted_b_dq, mask = p_dqkg_mask)
         casted_b_dk = b_dk.to(p_dk.dtype.element_ty)
         tl.extra.cann.extension.compile_hint(casted_b_dk, "mayDiscretememaccess")
-        tl.store(p_dk, casted_b_dk, boundary_check=(0, 1))
+        tl.store(p_dk, casted_b_dk, mask = p_dqkg_mask)
         casted_b_dg = b_dg.to(p_dg.dtype.element_ty)
         tl.extra.cann.extension.compile_hint(casted_b_dg, "mayDiscretememaccess")
-        tl.store(p_dg, casted_b_dg, boundary_check=(0, 1))
+        tl.store(p_dg, casted_b_dg, mask = p_dqkg_mask)
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_dA = tl.where(m_A, b_dA * b_beta[None, :], 0)
