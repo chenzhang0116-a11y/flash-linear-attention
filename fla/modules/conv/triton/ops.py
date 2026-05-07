@@ -33,7 +33,7 @@ def causal_conv1d_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    BT: int = 64,
+    BT: int = 32,
 ) -> torch.Tensor:
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -139,7 +139,7 @@ def causal_conv1d_bwd(
     cu_seqlens: torch.Tensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    BT: int = 64,
+    BT: int = 32,
 ):
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -203,6 +203,7 @@ def causal_conv1d_bwd(
         stride_dx_t=stride_dx_t,
         stride_dx_d=stride_dx_d,
         ACTIVATION=activation,
+        multibuffer=False,  # 关闭乒乓流水
     )
     if weight is not None:
         dw = dw.sum(0).to(weight)

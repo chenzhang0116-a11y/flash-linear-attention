@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 from einops import rearrange
+import triton.language.extra.cann.extension as extension 
 
 from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
 
@@ -143,7 +144,7 @@ def causal_conv1d_fwd_kernel(
 @triton.autotune(
     configs=[
         triton.Config({'BD': BD}, num_warps=num_warps)
-        for BD in [16, 32, 64, 128]
+        for BD in [16, 32]
         for num_warps in [4, 8, 16, 32]
     ],
     key=['D', 'W', 'NB'],
@@ -204,6 +205,7 @@ def causal_conv1d_bwd_kernel(
     if HAS_WEIGHT:
         p_x = tl.make_block_ptr(p_x, (T, D), (stride_x_t, stride_x_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
         b_x = tl.load(p_x, boundary_check=(0, 1))
+        extension.compile_hint(b_x, "mayDiscretememaccess") 
         # [BD, BW]
         b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
 
